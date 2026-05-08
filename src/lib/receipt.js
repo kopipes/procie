@@ -42,13 +42,6 @@ export const DEFAULT_AI_SETTINGS = {
   provider: 'custom',
   allowDemoFallback: true,
   prompt: DEFAULT_RECEIPT_PROMPT,
-  openrouter: {
-    apiKey: '',
-    model: 'anthropic/claude-sonnet-4',
-    baseUrl: 'https://openrouter.ai/api/v1/chat/completions',
-    appName: 'Split Bill App',
-    siteUrl: '',
-  },
   custom: {
     apiKey: '',
     model: 'gpt-4o-mini',
@@ -146,28 +139,6 @@ function resolveAiSettings(settings) {
     ...DEFAULT_AI_SETTINGS,
     ...settings,
     prompt: settings?.prompt || DEFAULT_AI_SETTINGS.prompt,
-    openrouter: {
-      ...DEFAULT_AI_SETTINGS.openrouter,
-      ...settings?.openrouter,
-      apiKey:
-        settings?.openrouter?.apiKey || import.meta.env.VITE_OPENROUTER_API_KEY || '',
-      model:
-        settings?.openrouter?.model ||
-        import.meta.env.VITE_OPENROUTER_MODEL ||
-        DEFAULT_AI_SETTINGS.openrouter.model,
-      baseUrl:
-        settings?.openrouter?.baseUrl ||
-        import.meta.env.VITE_OPENROUTER_BASE_URL ||
-        DEFAULT_AI_SETTINGS.openrouter.baseUrl,
-      appName:
-        settings?.openrouter?.appName ||
-        import.meta.env.VITE_OPENROUTER_APP_NAME ||
-        DEFAULT_AI_SETTINGS.openrouter.appName,
-      siteUrl:
-        settings?.openrouter?.siteUrl ||
-        import.meta.env.VITE_OPENROUTER_SITE_URL ||
-        DEFAULT_AI_SETTINGS.openrouter.siteUrl,
-    },
     custom: {
       ...DEFAULT_AI_SETTINGS.custom,
       ...settings?.custom,
@@ -246,16 +217,9 @@ function getFriendlyProviderError(providerName, baseUrl, status, rawBody) {
 }
 
 function getProviderConfig(aiSettings) {
-  if (aiSettings.provider === 'custom') {
-    return {
-      name: 'Custom API',
-      ...aiSettings.custom,
-    };
-  }
-
   return {
-    name: 'OpenRouter',
-    ...aiSettings.openrouter,
+    name: 'Custom API',
+    ...aiSettings.custom,
   };
 }
 

@@ -282,17 +282,10 @@ function App() {
 
   const deferredSearch = useDeferredValue(searchQuery);
   const isAdmin = accessSettings.role === 'admin';
-  const currentProviderLabel =
-    aiSettings.provider === 'custom'
-      ? 'Custom API'
-      : aiSettings.provider === 'openrouter'
-        ? 'OpenRouter'
-        : 'Demo';
-  const activeProviderConfig =
-    aiSettings.provider === 'custom' ? aiSettings.custom : aiSettings.openrouter;
+  const currentProviderLabel = 'Custom API';
+  const activeProviderConfig = aiSettings.custom;
   const currentEditingSettings = apiSettingsDraft || aiSettings;
-  const currentEditingProviderConfig =
-    currentEditingSettings.provider === 'custom' ? currentEditingSettings.custom : currentEditingSettings.openrouter;
+  const currentEditingProviderConfig = currentEditingSettings.custom;
   const hasUnsavedApiChanges = apiSettingsDraft !== null;
   const filteredPeople = filterPeople(savedPeople, deferredSearch);
   const summary = calculateSummary({
@@ -316,10 +309,6 @@ function App() {
     const merged = saveAiSettings({
       ...aiSettings,
       ...nextSettings,
-      openrouter: {
-        ...aiSettings.openrouter,
-        ...(nextSettings.openrouter || {}),
-      },
       custom: {
         ...aiSettings.custom,
         ...(nextSettings.custom || {}),
@@ -332,10 +321,6 @@ function App() {
     setApiSettingsDraft((prev) => ({
       ...prev || aiSettings,
       ...updates,
-      openrouter: {
-        ...(prev || aiSettings).openrouter,
-        ...(updates.openrouter || {}),
-      },
       custom: {
         ...(prev || aiSettings).custom,
         ...(updates.custom || {}),
@@ -795,17 +780,7 @@ function App() {
 
               <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
                 <div className="space-y-4">
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <SelectField
-                      label="Provider AI"
-                      value={currentEditingSettings.provider}
-                      onChange={(event) => {
-                        updateApiSettingsDraft({ provider: event.target.value });
-                      }}
-                    >
-                      <option value="openrouter">OpenRouter</option>
-                      <option value="custom">Custom API</option>
-                    </SelectField>
+                  <div className="block">
                     <label className="block">
                       <span className="mb-2 block text-sm font-medium text-ink dark:text-white">
                         Fallback demo
@@ -830,7 +805,7 @@ function App() {
                     <div className="mb-4 flex items-center justify-between gap-3">
                       <div>
                         <h3 className="text-base font-semibold text-ink dark:text-white">
-                          {currentEditingSettings.provider === 'custom' ? 'Custom API Settings' : 'OpenRouter Settings'}
+                          Custom API Settings
                         </h3>
                         <p className="text-sm text-muted dark:text-slate-300">
                           Gunakan endpoint OpenAI-compatible yang mendukung input vision berbentuk
@@ -842,45 +817,33 @@ function App() {
 
                     <div className="grid gap-4 sm:grid-cols-2">
                       <Field
-                        label={`${currentEditingSettings.provider === 'custom' ? 'Custom API' : 'OpenRouter'} API Key`}
-                        placeholder={
-                          currentEditingSettings.provider === 'custom'
-                            ? 'API key Sumopod / provider lain'
-                            : 'sk-or-v1-...'
-                        }
+                        label="Custom API Key"
+                        placeholder="API key dari provider Anda"
                         type="password"
                         value={currentEditingProviderConfig.apiKey}
                         onChange={(event) =>
                           updateApiSettingsDraft({
-                            [currentEditingSettings.provider]: { apiKey: event.target.value.trim() },
+                            custom: { apiKey: event.target.value.trim() },
                           })
                         }
                       />
                       <Field
                         label="Model"
-                        placeholder={
-                          currentEditingSettings.provider === 'custom'
-                            ? 'Model Sumopod / provider lain'
-                            : 'anthropic/claude-sonnet-4'
-                        }
+                        placeholder="gpt-4o-mini atau model lainnya"
                         value={currentEditingProviderConfig.model}
                         onChange={(event) =>
                           updateApiSettingsDraft({
-                            [currentEditingSettings.provider]: { model: event.target.value.slice(0, 120) },
+                            custom: { model: event.target.value.slice(0, 120) },
                           })
                         }
                       />
                       <Field
                         label="Endpoint"
-                        placeholder={
-                          currentEditingSettings.provider === 'custom'
-                            ? 'https://your-sumopod-host/v1/chat/completions'
-                            : 'https://openrouter.ai/api/v1/chat/completions'
-                        }
+                        placeholder="https://your-api-host/v1/chat/completions"
                         value={currentEditingProviderConfig.baseUrl}
                         onChange={(event) =>
                           updateApiSettingsDraft({
-                            [currentEditingSettings.provider]: { baseUrl: event.target.value.slice(0, 200) },
+                            custom: { baseUrl: event.target.value.slice(0, 200) },
                           })
                         }
                       />
@@ -890,7 +853,7 @@ function App() {
                         value={currentEditingProviderConfig.appName}
                         onChange={(event) =>
                           updateApiSettingsDraft({
-                            [currentEditingSettings.provider]: { appName: event.target.value.slice(0, 80) },
+                            custom: { appName: event.target.value.slice(0, 80) },
                           })
                         }
                       />
@@ -903,7 +866,7 @@ function App() {
                         value={currentEditingProviderConfig.siteUrl}
                         onChange={(event) =>
                           updateApiSettingsDraft({
-                            [currentEditingSettings.provider]: { siteUrl: event.target.value.slice(0, 160) },
+                            custom: { siteUrl: event.target.value.slice(0, 160) },
                           })
                         }
                       />
@@ -941,7 +904,7 @@ function App() {
                         onClick={() => {
                           setAiSettings(saveAiSettings(DEFAULT_AI_SETTINGS));
                           setApiSettingsDraft(null);
-                          setShareState('AI settings dikembalikan ke default OpenRouter + Custom.');
+                          setShareState('AI settings dikembalikan ke default Custom API.');
                         }}
                       >
                         Reset AI Default
@@ -1817,7 +1780,7 @@ function App() {
             <div className="mt-5 rounded-[28px] bg-slate-100/80 p-4 text-sm text-muted dark:bg-slate-800/70 dark:text-slate-300">
               <p className="font-semibold text-ink dark:text-white">Catatan implementasi</p>
               <ul className="mt-2 space-y-2">
-                <li>Provider AI bisa dipilih antara OpenRouter atau Custom API di UI.</li>
+                <li>Provider AI adalah Custom API saja. Semua pengaturan disimpan permanen kecuali API key.</li>
                 <li>Tanpa API key, app bisa masuk mode demo bila fallback diaktifkan.</li>
                 <li>Riwayat dan kontak disimpan penuh di `localStorage` perangkat.</li>
               </ul>

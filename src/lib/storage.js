@@ -13,17 +13,9 @@ const DEFAULT_AI_SETTINGS = {
   allowDemoFallback: true,
   prompt:
     'Kamu adalah asisten ekstraksi data resit restoran.\nAnalisis gambar resit ini dan kembalikan JSON valid saja.',
-  openrouter: {
-    apiKey: '',
-    model: 'anthropic/claude-sonnet-4',
-    baseUrl: 'https://openrouter.ai/api/v1/chat/completions',
-    appName: 'Split Bill App',
-    siteUrl: '',
-  },
   custom: {
-    apiKey: '',
-    model: 'gpt-4.1-mini',
-    baseUrl: 'https://api.openai.com/v1/chat/completions',
+    model: 'gpt-4o-mini',
+    baseUrl: 'https://ai.sumopod.com/v1/chat/completions',
     appName: 'Split Bill App',
     siteUrl: '',
   },
@@ -179,35 +171,51 @@ export function saveTheme(theme) {
 
 export function loadAiSettings() {
   const stored = safeRead(STORAGE_KEYS.aiSettings, null);
+  const sessionApiKey = typeof window !== 'undefined' 
+    ? window.sessionStorage.getItem('split-bill-api-key') 
+    : '';
+  
   return {
     ...DEFAULT_AI_SETTINGS,
     ...stored,
-    openrouter: {
-      ...DEFAULT_AI_SETTINGS.openrouter,
-      ...(stored?.openrouter || {}),
-    },
     custom: {
       ...DEFAULT_AI_SETTINGS.custom,
       ...(stored?.custom || {}),
+      apiKey: sessionApiKey || '',
     },
   };
 }
 
 export function saveAiSettings(settings) {
+  // Separate apiKey from other settings
+  const { custom: customSettings, ...persistedSettings } = settings;
+  const apiKey = customSettings?.apiKey || '';
+  
+  // Save persistent settings to localStorage
   const merged = {
     ...DEFAULT_AI_SETTINGS,
-    ...settings,
-    openrouter: {
-      ...DEFAULT_AI_SETTINGS.openrouter,
-      ...(settings?.openrouter || {}),
-    },
+    ...persistedSettings,
     custom: {
       ...DEFAULT_AI_SETTINGS.custom,
-      ...(settings?.custom || {}),
+      ...(persistedSettings?.custom || {}),
+      // Don't include apiKey in localStorage
     },
   };
+  
   safeWrite(STORAGE_KEYS.aiSettings, merged);
-  return merged;
+  
+  // Save apiKey to sessionStorage
+  if (typeof window !== 'undefined') {
+    window.sessionStorage.setItem('split-bill-api-key', apiKey);
+  }
+  
+  return {
+    ...merged,
+    custom: {
+      ...merged.custom,
+      apiKey,
+    },
+  };
 }
 
 export function loadAccessSettings() {
