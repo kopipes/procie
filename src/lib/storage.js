@@ -1,4 +1,5 @@
 import { uid } from './format';
+import { DEFAULT_AI_SETTINGS } from './receipt';
 
 const STORAGE_KEYS = {
   people: 'split-bill-saved-people',
@@ -6,19 +7,6 @@ const STORAGE_KEYS = {
   theme: 'split-bill-theme',
   aiSettings: 'split-bill-ai-settings',
   accessSettings: 'split-bill-access-settings',
-};
-
-const DEFAULT_AI_SETTINGS = {
-  provider: 'custom',
-  allowDemoFallback: true,
-  prompt:
-    'Kamu adalah asisten ekstraksi data resit restoran.\nAnalisis gambar resit ini dan kembalikan JSON valid saja.',
-  custom: {
-    model: 'gpt-4o-mini',
-    baseUrl: 'https://ai.sumopod.com/v1/chat/completions',
-    appName: 'Split Bill App',
-    siteUrl: '',
-  },
 };
 
 const DEFAULT_ACCESS_SETTINGS = {
