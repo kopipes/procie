@@ -81,7 +81,18 @@ function extractJsonPayload(text) {
   }
 
   try {
-    return JSON.parse(json.slice(firstBrace, lastBrace + 1));
+    let jsonStr = json.slice(firstBrace, lastBrace + 1);
+    // Fix NULL values (from some APIs) - replace with null
+    jsonStr = jsonStr.replace(/:\s*NULL\b/gi, ': null');
+    // Fix unquoted strings that look like null
+    jsonStr = jsonStr.replace(/:\s*([A-Z]+)\b(?=[,\}])/g, (match, word) => {
+      // If it's an unquoted value that's not a JSON keyword, wrap it
+      if (!['true', 'false', 'null'].includes(word.toLowerCase())) {
+        return `: "${word}"`;
+      }
+      return match.replace(word, word.toLowerCase());
+    });
+    return JSON.parse(jsonStr);
   } catch (e) {
     console.error('❌ JSON parse failed:', e.message, 'Text:', json.substring(firstBrace, Math.min(lastBrace + 100, json.length)));
     throw new Error(`JSON parsing gagal: ${e.message}. Pastikan resit terbaca dengan jelas.`);
