@@ -163,9 +163,15 @@ export function loadAiSettings() {
     ? window.sessionStorage.getItem('split-bill-api-key') 
     : '';
   
+  // If there's a stored prompt but it's the old short version, reset to default
+  const storedPrompt = stored?.prompt;
+  const isOldShortPrompt = storedPrompt && storedPrompt.includes('Analisis gambar resit ini dan kembalikan JSON valid saja') && !storedPrompt.includes('OCR profesional');
+  
   return {
     ...DEFAULT_AI_SETTINGS,
     ...stored,
+    // Always use the new full prompt if old version detected
+    prompt: isOldShortPrompt ? DEFAULT_AI_SETTINGS.prompt : (stored?.prompt || DEFAULT_AI_SETTINGS.prompt),
     custom: {
       ...DEFAULT_AI_SETTINGS.custom,
       ...(stored?.custom || {}),
