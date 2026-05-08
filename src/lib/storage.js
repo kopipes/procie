@@ -187,19 +187,23 @@ export function loadAiSettings() {
 }
 
 export function saveAiSettings(settings) {
-  // Separate apiKey from other settings
+  // Separate apiKey from other settings - apiKey goes to sessionStorage only
   const { custom: customSettings, ...persistedSettings } = settings;
   const apiKey = customSettings?.apiKey || '';
+  
+  // Keep custom settings (model, endpoint, etc) permanent, exclude apiKey
+  const customPersisted = {
+    model: customSettings?.model || DEFAULT_AI_SETTINGS.custom.model,
+    baseUrl: customSettings?.baseUrl || DEFAULT_AI_SETTINGS.custom.baseUrl,
+    appName: customSettings?.appName || DEFAULT_AI_SETTINGS.custom.appName,
+    siteUrl: customSettings?.siteUrl || DEFAULT_AI_SETTINGS.custom.siteUrl,
+  };
   
   // Save persistent settings to localStorage
   const merged = {
     ...DEFAULT_AI_SETTINGS,
     ...persistedSettings,
-    custom: {
-      ...DEFAULT_AI_SETTINGS.custom,
-      ...(persistedSettings?.custom || {}),
-      // Don't include apiKey in localStorage
-    },
+    custom: customPersisted,
   };
   
   safeWrite(STORAGE_KEYS.aiSettings, merged);
