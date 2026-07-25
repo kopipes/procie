@@ -44,7 +44,7 @@ export const DEFAULT_AI_SETTINGS = {
   prompt: DEFAULT_RECEIPT_PROMPT,
   custom: {
     apiKey: '',
-    model: 'gpt-4o-mini',
+    model: 'gemini/gemini-3.1-flash-lite',
     baseUrl: 'https://ai.sumopod.com/v1/chat/completions',
     appName: 'Split Bill App',
     siteUrl: '',
@@ -241,6 +241,15 @@ function validateProviderConfig(providerConfig) {
 
   if (!providerConfig.baseUrl) {
     throw new Error(`Endpoint ${providerConfig.name} belum diisi. Buka Settings lalu isi Base URL API.`);
+  }
+
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    const normalizedBaseUrl = String(providerConfig.baseUrl).trim().toLowerCase();
+    if (normalizedBaseUrl.startsWith('http://')) {
+      throw new Error(
+        `Endpoint ${providerConfig.name} masih memakai HTTP. Ganti ke HTTPS agar browser tidak menandai halaman sebagai Not Secure.`,
+      );
+    }
   }
 }
 

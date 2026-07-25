@@ -166,7 +166,16 @@ export function loadAiSettings() {
   // If there's a stored prompt but it's the old short version, reset to default
   const storedPrompt = stored?.prompt;
   const isOldShortPrompt = storedPrompt && storedPrompt.includes('Analisis gambar resit ini dan kembalikan JSON valid saja') && !storedPrompt.includes('OCR profesional');
-  
+
+  // Migrate model: if the user never changed it away from a previous default,
+  // move them onto the current default model.
+  const LEGACY_DEFAULT_MODELS = ['gpt-4o-mini', 'gpt-4.1-mini'];
+  const storedModel = stored?.custom?.model;
+  const migratedModel =
+    !storedModel || LEGACY_DEFAULT_MODELS.includes(storedModel)
+      ? DEFAULT_AI_SETTINGS.custom.model
+      : storedModel;
+
   return {
     ...DEFAULT_AI_SETTINGS,
     ...stored,
@@ -175,6 +184,7 @@ export function loadAiSettings() {
     custom: {
       ...DEFAULT_AI_SETTINGS.custom,
       ...(stored?.custom || {}),
+      model: migratedModel,
       apiKey: sessionApiKey || '',
     },
   };

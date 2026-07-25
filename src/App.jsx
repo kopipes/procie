@@ -30,11 +30,11 @@ const steps = [
 ];
 
 const pages = [
-  { id: 'session', title: 'Sesi Aktif', caption: 'Scan, assign, dan rekap tagihan' },
-  { id: 'history', title: 'Riwayat', caption: 'Buka ulang sesi yang sudah disimpan' },
-  { id: 'contacts', title: 'Kontak', caption: 'Kelola daftar peserta tersimpan' },
-  { id: 'user-settings', title: 'Pengaturan', caption: 'Tema, bahasa, preferensi' },
-  { id: 'admin-settings', title: 'API & Admin', caption: 'Konfigurasi AI dan akses', adminOnly: true },
+  { id: 'session', title: 'Sesi Aktif', short: 'Sesi', icon: '🧾', caption: 'Scan, assign, dan rekap tagihan' },
+  { id: 'history', title: 'Riwayat', short: 'Riwayat', icon: '🕘', caption: 'Buka ulang sesi yang sudah disimpan' },
+  { id: 'contacts', title: 'Kontak', short: 'Kontak', icon: '👥', caption: 'Kelola daftar peserta tersimpan' },
+  { id: 'user-settings', title: 'Pengaturan', short: 'Atur', icon: '⚙️', caption: 'Tema, bahasa, preferensi' },
+  { id: 'admin-settings', title: 'API & Admin', short: 'API', icon: '🔑', caption: 'Konfigurasi AI dan akses', adminOnly: true },
 ];
 
 function sanitizeParticipantName(name) {
@@ -287,6 +287,19 @@ function App() {
   const currentEditingSettings = apiSettingsDraft || aiSettings;
   const currentEditingProviderConfig = currentEditingSettings.custom;
   const hasUnsavedApiChanges = apiSettingsDraft !== null;
+  const isHttpsPage = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  const savedEndpoint = (activeProviderConfig.baseUrl || '').trim();
+  const draftEndpoint = (currentEditingProviderConfig.baseUrl || '').trim();
+  const savedSiteUrl = (activeProviderConfig.siteUrl || '').trim();
+  const draftSiteUrl = (currentEditingProviderConfig.siteUrl || '').trim();
+  const endpointProtocolWarning =
+    isHttpsPage && draftEndpoint.toLowerCase().startsWith('http://')
+      ? 'Endpoint API masih memakai HTTP. Di Brave ini bisa membuat halaman ditandai Not Secure walau sertifikat domain valid.'
+      : '';
+  const siteUrlProtocolWarning =
+    isHttpsPage && draftSiteUrl.toLowerCase().startsWith('http://')
+      ? 'Site URL masih memakai HTTP. Sebaiknya ubah ke HTTPS agar header referer tetap konsisten.'
+      : '';
   const filteredPeople = filterPeople(savedPeople, deferredSearch);
   const summary = calculateSummary({
     receipt: state.receiptData,
@@ -304,6 +317,27 @@ function App() {
     document.documentElement.classList.toggle('dark', theme === 'dark');
     saveTheme(theme);
   }, [theme]);
+
+  // Keep the flow smooth: whenever the page or step changes, bring the user
+  // back to the top so they always land on the header of the new view.
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [activePage, state.currentStep]);
+
+  function goToPage(page) {
+    setActivePage(page);
+    setShowMobileMenu(false);
+  }
+
+  function goToStep(step) {
+    // Allow jumping back to any step already reached; forward moves stay
+    // gated behind the validated "Lanjut" buttons.
+    if (step <= state.currentStep) {
+      dispatch({ type: 'setStep', step });
+    }
+  }
 
   function persistAiSettings(nextSettings) {
     const merged = saveAiSettings({
@@ -593,7 +627,7 @@ function App() {
       return;
     }
 
-    setActivePage('settings');
+    setActivePage('user-settings');
 
     if (!accessSettings.adminPin) {
       enterAdminMode();
@@ -616,7 +650,7 @@ function App() {
     });
 
     try {
-      const result = await testAiConnection(aiSettings);
+      const result = await testAiConnection(currentEditingSettings);
       setConnectionState({
         loading: false,
         message: result.message,
@@ -665,14 +699,9 @@ function App() {
         </div>
       </header>
 
-      <PageTabs activePage={activePage} onSelect={(page) => {
-        setActivePage(page);
-        setShowMobileMenu(false);
-      }} isAdmin={isAdmin} />
-
       {shareState ? <Message tone="info">{shareState}</Message> : null}
 
-      {activePage === 'session' ? <Stepper currentStep={state.currentStep} /> : null}
+      {activePage === 'session' ? <Stepper currentStep={state.currentStep} onSelect={goToStep} /> : null}
 
       {activePage === 'user-settings' ? (
         <SectionCard>
@@ -829,7 +858,7 @@ function App() {
                       />
                       <Field
                         label="Model"
-                        placeholder="gpt-4o-mini atau model lainnya"
+                        placeholder="gemini/gemini-3.1-flash-lite atau model lainnya"
                         value={currentEditingProviderConfig.model}
                         onChange={(event) =>
                           updateApiSettingsDraft({
@@ -872,6 +901,9 @@ function App() {
                       />
                     </div>
                   </div>
+
+                  {endpointProtocolWarning ? <Message tone="warning">{endpointProtocolWarning}</Message> : null}
+                  {siteUrlProtocolWarning ? <Message tone="warning">{siteUrlProtocolWarning}</Message> : null}
 
                   <TextAreaField
                     label="Prompt Ekstraksi Resit"
@@ -953,6 +985,40 @@ function App() {
                       <li>UI role ini adalah pembatas lokal perangkat.</li>
                       <li>Provider aktif: <strong>{currentProviderLabel}</strong></li>
                     </ul>
+                  </div>
+
+                  <div className="rounded-[28px] border border-slate-200 bg-white/80 p-4 text-sm dark:border-slate-800 dark:bg-slate-900/70">
+                    <h3 className="text-base font-semibold text-ink dark:text-white">Status Endpoint</h3>
+                    <div className="mt-4 space-y-3">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.18em] text-muted dark:text-slate-400">Endpoint tersimpan</p>
+                        <p className="mt-1 break-all font-medium text-ink dark:text-white">
+                          {savedEndpoint || 'Belum diisi'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.18em] text-muted dark:text-slate-400">Endpoint di form sekarang</p>
+                        <p className="mt-1 break-all font-medium text-ink dark:text-white">
+                          {draftEndpoint || 'Belum diisi'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.18em] text-muted dark:text-slate-400">Site URL di form sekarang</p>
+                        <p className="mt-1 break-all font-medium text-ink dark:text-white">
+                          {draftSiteUrl || 'Kosong, akan pakai origin halaman ini'}
+                        </p>
+                      </div>
+                      {hasUnsavedApiChanges ? (
+                        <p className="rounded-2xl bg-amber-50 px-3 py-2 text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">
+                          Ada perubahan yang belum disimpan. Tombol test sekarang memakai nilai di form saat ini.
+                        </p>
+                      ) : null}
+                      {!hasUnsavedApiChanges && savedSiteUrl ? (
+                        <p className="rounded-2xl bg-slate-100 px-3 py-2 text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                          Site URL tersimpan: {savedSiteUrl}
+                        </p>
+                      ) : null}
+                    </div>
                   </div>
 
                   {connectionState.message ? <Message tone="info">{connectionState.message}</Message> : null}
@@ -1789,32 +1855,41 @@ function App() {
         </aside>
       </main>
       ) : null}
+
+      {/* Spacer so the fixed bottom nav never covers the last bit of content */}
+      <div className="h-20" aria-hidden="true" />
+
+      <BottomNav activePage={activePage} onSelect={goToPage} isAdmin={isAdmin} />
     </div>
   );
 }
 
-function Stepper({ currentStep }) {
+function Stepper({ currentStep, onSelect }) {
   return (
     <section className="glass-card p-2 sm:p-3 md:p-5">
       <div className="mobile-scroller sm:grid sm:gap-2 sm:gap-3 sm:overflow-visible sm:px-0 sm:pb-0 sm:[scrollbar-width:auto] sm:grid-cols-4">
         {steps.map((step) => {
           const active = step.id === currentStep;
           const completed = step.id < currentStep;
+          const reachable = step.id <= currentStep;
 
           return (
-            <div
+            <button
               key={step.id}
-              className={`rounded-[26px] border p-3 sm:p-4 transition ${
+              type="button"
+              disabled={!reachable}
+              onClick={() => onSelect?.(step.id)}
+              className={`text-left rounded-[26px] border p-3 sm:p-4 transition ${
                 active
                   ? 'border-brand bg-brand text-white'
                   : completed
-                    ? 'border-aqua/40 bg-aqua/10 text-ink dark:text-white'
+                    ? 'border-aqua/40 bg-aqua/10 text-ink dark:text-white hover:border-aqua'
                     : 'border-slate-200 bg-white/70 text-muted dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300'
-              } min-w-[200px] sm:min-w-0 snap-start`}
+              } ${reachable ? 'cursor-pointer' : 'cursor-not-allowed opacity-90'} min-w-[200px] sm:min-w-0 snap-start`}
             >
               <div className="flex items-center gap-2 sm:gap-3">
                 <div
-                  className={`flex h-8 w-8 sm:h-10 sm:w-10 items-center justify-center rounded-2xl text-xs sm:text-sm font-bold ${
+                  className={`flex h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl text-xs sm:text-sm font-bold ${
                     active
                       ? 'bg-white/20 text-white'
                       : completed
@@ -1831,7 +1906,7 @@ function Stepper({ currentStep }) {
                   </p>
                 </div>
               </div>
-            </div>
+            </button>
           );
         })}
       </div>
@@ -1839,39 +1914,43 @@ function Stepper({ currentStep }) {
   );
 }
 
-function PageTabs({ activePage, onSelect, isAdmin }) {
-  const visiblePages = pages.filter(page => !page.adminOnly || isAdmin);
-  
-  return (
-    <section className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-3 lg:grid-cols-5">
-      {visiblePages.map((page) => {
-        const active = page.id === activePage;
+function BottomNav({ activePage, onSelect, isAdmin }) {
+  const visiblePages = pages.filter((page) => !page.adminOnly || isAdmin);
 
-        return (
-          <button
-            key={page.id}
-            className={`glass-card p-2.5 sm:p-3 md:p-4 text-left transition ${
-              active
-                ? 'border-brand bg-brand text-white'
-                : 'hover:border-brand/30 hover:bg-white dark:hover:bg-slate-900'
-            }`}
-            onClick={() => onSelect(page.id)}
-            title={page.title}
-          >
-            <p
-              className={`text-xs sm:text-sm font-semibold truncate ${
-                active ? 'text-white' : 'text-ink dark:text-white'
+  // Same thumb-friendly icon bar on every screen size. On mobile it fills the
+  // width; on desktop the icon group stays centered inside a capped container.
+  return (
+    <nav
+      className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-lg dark:border-slate-800 dark:bg-slate-950/95"
+      aria-label="Navigasi utama"
+    >
+      <div
+        className="mx-auto grid w-full max-w-lg"
+        style={{ gridTemplateColumns: `repeat(${visiblePages.length}, minmax(0, 1fr))` }}
+      >
+        {visiblePages.map((page) => {
+          const active = page.id === activePage;
+
+          return (
+            <button
+              key={page.id}
+              type="button"
+              onClick={() => onSelect(page.id)}
+              aria-current={active ? 'page' : undefined}
+              title={page.title}
+              className={`flex flex-col items-center gap-0.5 px-1 py-2.5 text-[11px] font-medium transition hover:text-brand ${
+                active ? 'text-brand' : 'text-muted dark:text-slate-400'
               }`}
             >
-              {page.title}
-            </p>
-            <p className={`mt-0.5 sm:mt-1 text-xs leading-4 truncate ${active ? 'text-white/80' : 'text-muted dark:text-slate-300'}`}>
-              {page.caption}
-            </p>
-          </button>
-        );
-      })}
-    </section>
+              <span className={`text-lg leading-none transition-transform ${active ? 'scale-110' : ''}`}>
+                {page.icon}
+              </span>
+              <span className="truncate">{page.short}</span>
+            </button>
+          );
+        })}
+      </div>
+    </nav>
   );
 }
 
