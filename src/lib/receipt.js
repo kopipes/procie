@@ -266,13 +266,56 @@ export function createManualReceipt() {
   });
 }
 
+// --- Server proxy helpers ---
+// All AI calls go through /api/* on our own server so the API key never
+// touches the browser.
+
+const PROXY_BASE = '/api';
+
+export async function saveServerApiKey(apiKey, adminPin) {
+  const res = await fetch(`${PROXY_BASE}/config/apikey`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-pin': adminPin || '',
+    },
+    body: JSON.stringify({ apiKey }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || 'Gagal memperbarui API key.');
+  return data;
+}
+
+export async function fetchServerConfig() {
+  try {
+    const res = await fetch(`${PROXY_BASE}/config`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function saveServerConfig(updates, adminPin) {
+  const res = await fetch(`${PROXY_BASE}/config`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-pin': adminPin || '',
+    },
+    body: JSON.stringify(updates),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || 'Gagal menyimpan konfigurasi server.');
+  return data.config;
+}
+
 export async function scanReceiptWithAI(file, settings) {
   const rawImage = await fileToDataUrl(file);
   const aiSettings = resolveAiSettings(settings);
-  const providerConfig = getProviderConfig(aiSettings);
-  const apiKey = providerConfig.apiKey;
 
-  if (aiSettings.provider === 'demo' || (!apiKey && aiSettings.allowDemoFallback)) {
+  // Demo fallback: if explicitly set to demo provider
+  if (aiSettings.provider === 'demo') {
     await new Promise((resolve) => window.setTimeout(resolve, 1200));
     return {
       mode: 'demo',
@@ -284,138 +327,92 @@ export async function scanReceiptWithAI(file, settings) {
     };
   }
 
-  validateProviderConfig(providerConfig);
-
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), 30000);
+  const timeoutId = window.setTimeout(() => controller.abort(), 45000);
 
   try {
-    const response = await fetch(providerConfig.baseUrl, {
+    const response = await fetch(`${PROXY_BASE}/scan`, {
       method: 'POST',
       signal: controller.signal,
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`,
-        'http-referer': providerConfig.siteUrl || window.location.origin,
-        'x-title': providerConfig.appName || 'Split Bill App',
-      },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: providerConfig.model,
-        max_tokens: 2000,
-        temperature: 0.05,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: aiSettings.prompt || DEFAULT_RECEIPT_PROMPT },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: rawImage,
-                },
-              },
-            ],
-          },
-        ],
+        imageDataUrl: rawImage,
+        prompt: aiSettings.prompt || DEFAULT_RECEIPT_PROMPT,
       }),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        getFriendlyProviderError(
-          providerConfig.name,
-          providerConfig.baseUrl,
-          response.status,
-          errorText,
-        ),
-      );
-    }
-
     const payload = await response.json();
 
+    // Server says AI is disabled
+    if (response.status === 403) {
+      throw new Error(payload?.error || 'Scan AI dinonaktifkan oleh admin.');
+    }
+
+    // Server has no API key but demo fallback is allowed
+    if (response.status === 503 && payload?.demo && aiSettings.allowDemoFallback) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1200));
+      return {
+        mode: 'demo',
+        receipt: normalizeReceipt({
+          ...demoReceipt,
+          rawImage,
+          restaurantName: file.name ? `${demoReceipt.restaurantName} Demo` : demoReceipt.restaurantName,
+        }),
+      };
+    }
+
+    if (!response.ok) {
+      throw new Error(payload?.error || `Server error ${response.status}.`);
+    }
+
     const textContent = extractOpenRouterText(payload);
-    console.log('✓ API response text:', textContent.substring(0, 200));
-    
     const jsonPayload = extractJsonPayload(textContent);
-    console.log('✓ Extracted JSON:', jsonPayload);
-    
     const normalized = normalizeApiPayload(jsonPayload, rawImage);
-    console.log('✓ Normalized:', { items: normalized.items.length, subtotal: normalized.subtotal });
 
     return {
       mode: 'live',
       receipt: normalized,
     };
   } catch (error) {
-    console.error('❌ Scan error:', error.message);
     if (error.name === 'AbortError') {
-      throw new Error('Timeout lebih dari 30 detik. Resit mungkin terlalu kompleks. Coba pakai input manual atau resit yang lebih jelas.');
+      throw new Error('Timeout lebih dari 45 detik. Resit mungkin terlalu kompleks. Coba pakai input manual atau resit yang lebih jelas.');
     }
-
-    throw new Error(error.message || `Gagal memproses resit dengan ${providerConfig.name}.`);
+    throw new Error(error.message || 'Gagal memproses resit.');
   } finally {
     window.clearTimeout(timeoutId);
   }
 }
 
-export async function testAiConnection(settings) {
-  const aiSettings = resolveAiSettings(settings);
-  const providerConfig = getProviderConfig(aiSettings);
-  validateProviderConfig(providerConfig);
-
+export async function testAiConnection(settings, adminPin) {
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+  const timeoutId = window.setTimeout(() => controller.abort(), 20000);
 
   try {
-    const response = await fetch(providerConfig.baseUrl, {
+    const response = await fetch(`${PROXY_BASE}/test`, {
       method: 'POST',
       signal: controller.signal,
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${providerConfig.apiKey}`,
-        'http-referer': providerConfig.siteUrl || window.location.origin,
-        'x-title': providerConfig.appName || 'Split Bill App',
+        'x-admin-pin': adminPin || '',
       },
-      body: JSON.stringify({
-        model: providerConfig.model,
-        max_tokens: 12,
-        temperature: 0,
-        messages: [
-          {
-            role: 'user',
-            content: 'Reply with exactly: OK',
-          },
-        ],
-      }),
+      body: JSON.stringify({}),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        getFriendlyProviderError(
-          providerConfig.name,
-          providerConfig.baseUrl,
-          response.status,
-          errorText,
-        ),
-      );
-    }
+    const data = await response.json();
 
-    const payload = await response.json();
-    const text = extractOpenRouterText(payload);
+    if (!response.ok) {
+      throw new Error(data?.error || `Server error ${response.status}.`);
+    }
 
     return {
       ok: true,
-      providerName: providerConfig.name,
-      model: providerConfig.model,
-      message: `${providerConfig.name} terhubung. Respons test: ${text.trim() || 'OK'}`,
+      message: data.message || 'Terhubung.',
+      model: data.model,
     };
   } catch (error) {
     if (error.name === 'AbortError') {
-      throw new Error('Test koneksi timeout lebih dari 15 detik.');
+      throw new Error('Test koneksi timeout lebih dari 20 detik.');
     }
-
     throw error;
   } finally {
     window.clearTimeout(timeoutId);

@@ -159,18 +159,29 @@ export function saveTheme(theme) {
 
 export function loadAiSettings() {
   const stored = safeRead(STORAGE_KEYS.aiSettings, null);
-  const sessionApiKey = typeof window !== 'undefined' 
-    ? window.sessionStorage.getItem('split-bill-api-key') 
-    : '';
-  
+
+  // Migrate: move apiKey from sessionStorage to localStorage if present
+  if (typeof window !== 'undefined') {
+    const sessionApiKey = window.sessionStorage.getItem('split-bill-api-key');
+    if (sessionApiKey && !stored?.custom?.apiKey) {
+      // Persist it and clear sessionStorage
+      const migrated = stored ? { ...stored, custom: { ...(stored.custom || {}), apiKey: sessionApiKey } } : null;
+      if (migrated) safeWrite(STORAGE_KEYS.aiSettings, migrated);
+    }
+    window.sessionStorage.removeItem('split-bill-api-key');
+  }
+
+  // Re-read after potential migration
+  const final = safeRead(STORAGE_KEYS.aiSettings, null);
+
   // If there's a stored prompt but it's the old short version, reset to default
-  const storedPrompt = stored?.prompt;
+  const storedPrompt = final?.prompt;
   const isOldShortPrompt = storedPrompt && storedPrompt.includes('Analisis gambar resit ini dan kembalikan JSON valid saja') && !storedPrompt.includes('OCR profesional');
 
   // Migrate model: if the user never changed it away from a previous default,
   // move them onto the current default model.
   const LEGACY_DEFAULT_MODELS = ['gpt-4o-mini', 'gpt-4.1-mini'];
-  const storedModel = stored?.custom?.model;
+  const storedModel = final?.custom?.model;
   const migratedModel =
     !storedModel || LEGACY_DEFAULT_MODELS.includes(storedModel)
       ? DEFAULT_AI_SETTINGS.custom.model
@@ -178,52 +189,45 @@ export function loadAiSettings() {
 
   return {
     ...DEFAULT_AI_SETTINGS,
-    ...stored,
+    ...final,
     // Always use the new full prompt if old version detected
-    prompt: isOldShortPrompt ? DEFAULT_AI_SETTINGS.prompt : (stored?.prompt || DEFAULT_AI_SETTINGS.prompt),
+    prompt: isOldShortPrompt ? DEFAULT_AI_SETTINGS.prompt : (final?.prompt || DEFAULT_AI_SETTINGS.prompt),
+    // aiEnabled defaults to true if not set
+    aiEnabled: final?.aiEnabled !== undefined ? final.aiEnabled : true,
     custom: {
       ...DEFAULT_AI_SETTINGS.custom,
-      ...(stored?.custom || {}),
+      ...(final?.custom || {}),
       model: migratedModel,
-      apiKey: sessionApiKey || '',
+      apiKey: final?.custom?.apiKey || '',
     },
   };
 }
 
 export function saveAiSettings(settings) {
-  // Separate apiKey from other settings - apiKey goes to sessionStorage only
   const { custom: customSettings, ...persistedSettings } = settings;
   const apiKey = customSettings?.apiKey || '';
-  
-  // Keep custom settings (model, endpoint, etc) permanent, exclude apiKey
+
+  // All custom settings including apiKey are persisted to localStorage.
+  // Admin controls the key; users never need to re-enter it.
   const customPersisted = {
     model: customSettings?.model || DEFAULT_AI_SETTINGS.custom.model,
     baseUrl: customSettings?.baseUrl || DEFAULT_AI_SETTINGS.custom.baseUrl,
     appName: customSettings?.appName || DEFAULT_AI_SETTINGS.custom.appName,
     siteUrl: customSettings?.siteUrl || DEFAULT_AI_SETTINGS.custom.siteUrl,
+    apiKey,
   };
-  
-  // Save persistent settings to localStorage
+
   const merged = {
     ...DEFAULT_AI_SETTINGS,
     ...persistedSettings,
+    // Preserve aiEnabled explicitly; default true
+    aiEnabled: persistedSettings.aiEnabled !== undefined ? persistedSettings.aiEnabled : true,
     custom: customPersisted,
   };
-  
+
   safeWrite(STORAGE_KEYS.aiSettings, merged);
-  
-  // Save apiKey to sessionStorage
-  if (typeof window !== 'undefined') {
-    window.sessionStorage.setItem('split-bill-api-key', apiKey);
-  }
-  
-  return {
-    ...merged,
-    custom: {
-      ...merged.custom,
-      apiKey,
-    },
-  };
+
+  return merged;
 }
 
 export function loadAccessSettings() {

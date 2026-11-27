@@ -1,5 +1,13 @@
 import { startTransition, useDeferredValue, useEffect, useReducer, useRef, useState } from 'react';
-import { buildShareText, calculateSummary, createEmptyAssignments, isDiscountItem, normalizeReceipt } from './lib/bill';
+import {
+  buildShareText,
+  calculateSummary,
+  createEmptyAssignments,
+  getAssignedUnits,
+  isDiscountItem,
+  normalizeItemAssignment,
+  normalizeReceipt,
+} from './lib/bill';
 import { clamp, formatCurrency, formatDate, formatRelativeDate, toPositiveInt, toRate, uid } from './lib/format';
 import { createManualReceipt, DEFAULT_AI_SETTINGS, scanReceiptWithAI, testAiConnection } from './lib/receipt';
 import { filterPeople } from './lib/search';
@@ -45,10 +53,18 @@ function syncAssignments(items, participants, previousAssignments) {
   const validParticipantIds = new Set(participants.map((participant) => participant.id));
 
   return items.reduce((accumulator, item) => {
-    const next = (previousAssignments[item.id] || []).filter((participantId) =>
-      validParticipantIds.has(participantId),
-    );
-    accumulator[item.id] = next;
+    const previous = previousAssignments[item.id];
+    const normalized = normalizeItemAssignment(previous, item.quantity);
+
+    // Drop people who left the session. Do not clamp total units here so an
+    // over-assignment stays visible and can be corrected by the user.
+    accumulator[item.id] = Object.entries(normalized).reduce((map, [participantId, units]) => {
+      if (validParticipantIds.has(participantId)) {
+        map[participantId] = units;
+      }
+      return map;
+    }, {});
+
     return accumulator;
   }, {});
 }
@@ -166,42 +182,107 @@ function appReducer(state, action) {
       };
     }
 
-    case 'toggleAssignment': {
-      const current = state.assignments[action.itemId] || [];
-      const hasAssignee = current.includes(action.participantId);
-      const nextAssignees = hasAssignee
-        ? current.filter((participantId) => participantId !== action.participantId)
-        : [...current, action.participantId];
+    case 'setItemUnits': {
+      const item = state.receiptData.items.find((entry) => entry.id === action.itemId);
+      if (!item) {
+        return state;
+      }
 
-      return {
-        ...state,
-        assignments: {
-          ...state.assignments,
-          [action.itemId]: nextAssignees,
-        },
-      };
-    }
-
-    case 'assignItemToAll': {
-      return {
-        ...state,
-        assignments: {
-          ...state.assignments,
-          [action.itemId]: state.participants.map((participant) => participant.id),
-        },
-      };
-    }
-
-    case 'toggleAllItemsForPerson': {
-      const allAssigned = state.receiptData.items.every((item) =>
-        (state.assignments[item.id] || []).includes(action.participantId),
+      const current = normalizeItemAssignment(state.assignments[action.itemId], item.quantity);
+      const quantity = Math.max(1, item.quantity || 1);
+      const otherUnits = Object.entries(current).reduce(
+        (sum, [participantId, units]) =>
+          participantId === action.participantId ? sum : sum + units,
+        0,
       );
+      // Never let a single person push the item past its available units.
+      const maxForPerson = Math.max(0, quantity - otherUnits);
+      const requested = Math.max(0, toPositiveInt(action.units, 0));
+      const units = Math.min(requested, maxForPerson);
 
+      const nextAssignment = { ...current };
+      if (units > 0) {
+        nextAssignment[action.participantId] = units;
+      } else {
+        delete nextAssignment[action.participantId];
+      }
+
+      return {
+        ...state,
+        assignments: {
+          ...state.assignments,
+          [action.itemId]: nextAssignment,
+        },
+      };
+    }
+
+    case 'assignItemEqually': {
+      const item = state.receiptData.items.find((entry) => entry.id === action.itemId);
+      if (!item || !state.participants.length) {
+        return state;
+      }
+
+      const quantity = Math.max(1, item.quantity || 1);
+      const ids = state.participants.map((participant) => participant.id);
+      // Spread units round-robin so e.g. qty 3 over 2 people becomes 2 + 1.
+      const nextAssignment = {};
+      for (let unit = 0; unit < quantity; unit += 1) {
+        const participantId = ids[unit % ids.length];
+        nextAssignment[participantId] = (nextAssignment[participantId] || 0) + 1;
+      }
+
+      return {
+        ...state,
+        assignments: {
+          ...state.assignments,
+          [action.itemId]: nextAssignment,
+        },
+      };
+    }
+
+    case 'clearItemAssignment': {
+      return {
+        ...state,
+        assignments: {
+          ...state.assignments,
+          [action.itemId]: {},
+        },
+      };
+    }
+
+    case 'assignAllItemsToPerson': {
       const assignments = state.receiptData.items.reduce((accumulator, item) => {
-        const current = state.assignments[item.id] || [];
-        accumulator[item.id] = allAssigned
-          ? current.filter((participantId) => participantId !== action.participantId)
-          : Array.from(new Set([...current, action.participantId]));
+        const quantity = Math.max(1, item.quantity || 1);
+        const current = normalizeItemAssignment(state.assignments[item.id], quantity);
+        const otherUnits = Object.entries(current).reduce(
+          (sum, [participantId, units]) =>
+            participantId === action.participantId ? sum : sum + units,
+          0,
+        );
+        const nextAssignment = { ...current };
+
+        if (otherUnits === 0) {
+          nextAssignment[action.participantId] = quantity;
+        } else if (current[action.participantId]) {
+          nextAssignment[action.participantId] = current[action.participantId];
+        }
+
+        accumulator[item.id] = nextAssignment;
+        return accumulator;
+      }, {});
+
+      return {
+        ...state,
+        assignments,
+      };
+    }
+
+    case 'clearAllItemsForPerson': {
+      const assignments = state.receiptData.items.reduce((accumulator, item) => {
+        const current = normalizeItemAssignment(state.assignments[item.id], item.quantity);
+        const nextAssignment = { ...current };
+        delete nextAssignment[action.participantId];
+        accumulator[item.id] = nextAssignment;
         return accumulator;
       }, {});
 
@@ -311,7 +392,11 @@ function App() {
   const validItems = state.receiptData.items.filter((item) => item.name.trim());
   const canContinueReceipt = validItems.length > 0;
   const canContinueParticipants = state.participants.length > 0;
-  const canContinueAssignments = state.participants.length > 0 && !summary.hasUnassignedItems;
+  const canContinueAssignments =
+    state.participants.length > 0 &&
+    !summary.hasUnassignedItems &&
+    !summary.hasOverAssignedItems &&
+    !summary.hasIncompleteItems;
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -581,8 +666,12 @@ function App() {
     setRecentSessions(removeRecentSession(id));
   }
 
-  function toggleAllForPerson(participantId) {
-    dispatch({ type: 'toggleAllItemsForPerson', participantId });
+  function assignAllForPerson(participantId) {
+    dispatch({ type: 'assignAllItemsToPerson', participantId });
+  }
+
+  function clearAllForPerson(participantId) {
+    dispatch({ type: 'clearAllItemsForPerson', participantId });
   }
 
   function isSelected(personId) {
@@ -1553,8 +1642,8 @@ function App() {
               <div className="mt-5 rounded-[28px] border border-slate-200 bg-white/80 p-4 dark:border-slate-800 dark:bg-slate-900/70">
                 <div className="flex items-center justify-between text-sm font-medium text-ink dark:text-white">
                   <span>
-                    Progress: {summary.receipt.items.length - summary.unassignedItemIds.length}/
-                    {summary.receipt.items.length} item ter-assign
+                    Progress: {assignableItems.length - summary.unassignedItemIds.length}/
+                    {assignableItems.length} item ter-assign
                   </span>
                   <span>{Math.round(summary.progress * 100)}%</span>
                 </div>
@@ -1564,12 +1653,30 @@ function App() {
                     style={{ width: `${Math.round(summary.progress * 100)}%` }}
                   />
                 </div>
+                <p className="mt-2 text-xs text-muted dark:text-slate-300">
+                  Tiap item punya jumlah porsi. Tentukan berapa porsi yang dimakan tiap orang —
+                  mis. item 3x dibagi 1 untuk satu orang dan 2 untuk orang lain.
+                </p>
               </div>
+
+              {summary.hasOverAssignedItems ? (
+                <Message tone="error">
+                  {summary.overAssignedItemIds.length} item kelebihan porsi dari jumlah yang ada.
+                  Kurangi porsi agar totalnya pas.
+                </Message>
+              ) : null}
 
               {summary.hasUnassignedItems ? (
                 <Message tone="warning">
-                  {summary.unassignedItemIds.length} item belum di-assign. Lanjut ke rekap akan
-                  terbuka setelah semuanya terpilih.
+                  {summary.unassignedItemIds.length} item belum dibagi porsinya. Lanjut ke rekap
+                  akan terbuka setelah semua porsi terbagi habis.
+                </Message>
+              ) : null}
+
+              {!summary.hasUnassignedItems && summary.hasIncompleteItems ? (
+                <Message tone="warning">
+                  Masih ada porsi yang belum terbagi habis. Seimbangkan jumlah porsi tiap orang
+                  sampai sisa porsi 0 sebelum lanjut ke rekap.
                 </Message>
               ) : null}
 
@@ -1582,19 +1689,28 @@ function App() {
               <div className="mt-5 grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
                 <div className="space-y-3">
                   <h3 className="text-base font-semibold text-ink dark:text-white">
-                    Pintasan per item
+                    Ringkasan porsi per item
                   </h3>
                   {assignableItems.map((item) => {
+                    const validation = summary.itemValidation[item.id] || {
+                      quantity: Math.max(1, item.quantity || 1),
+                      assignedUnits: 0,
+                      remainingUnits: Math.max(1, item.quantity || 1),
+                    };
                     const assignedCount = summary.shareMap[item.id] || 0;
                     const isUnassigned = summary.unassignedItemIds.includes(item.id);
+                    const isOver = summary.overAssignedItemIds.includes(item.id);
+                    const isShort = !isUnassigned && !isOver && validation.remainingUnits > 0;
 
                     return (
                       <div
                         key={item.id}
                         className={`rounded-[28px] border p-4 ${
-                          isUnassigned
-                            ? 'border-warn bg-amber-50 dark:border-warn/70 dark:bg-amber-500/10'
-                            : 'border-slate-200 bg-white/80 dark:border-slate-800 dark:bg-slate-900/70'
+                          isOver
+                            ? 'border-danger bg-rose-50 dark:border-danger/70 dark:bg-rose-500/10'
+                            : isUnassigned || isShort
+                              ? 'border-warn bg-amber-50 dark:border-warn/70 dark:bg-amber-500/10'
+                              : 'border-slate-200 bg-white/80 dark:border-slate-800 dark:bg-slate-900/70'
                         }`}
                       >
                         <div className="space-y-2">
@@ -1606,13 +1722,29 @@ function App() {
                           </p>
                           <div className="flex flex-wrap gap-2">
                             <span className="pill">
-                              {assignedCount > 1 ? `Split ${assignedCount} org` : `${assignedCount} org`}
+                              {validation.assignedUnits}/{validation.quantity} porsi dibagi
                             </span>
+                            {assignedCount > 1 ? (
+                              <span className="pill">{assignedCount} orang</span>
+                            ) : null}
+                            {validation.remainingUnits > 0 ? (
+                              <span className="pill text-warn">
+                                sisa {validation.remainingUnits}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-wrap gap-2">
                             <button
                               className="btn-secondary"
-                              onClick={() => dispatch({ type: 'assignItemToAll', itemId: item.id })}
+                              onClick={() => dispatch({ type: 'assignItemEqually', itemId: item.id })}
                             >
-                              Assign ke semua
+                              Bagi rata porsi
+                            </button>
+                            <button
+                              className="btn-secondary"
+                              onClick={() => dispatch({ type: 'clearItemAssignment', itemId: item.id })}
+                            >
+                              Kosongkan
                             </button>
                           </div>
                         </div>
@@ -1647,51 +1779,91 @@ function App() {
                             {participant.name}
                           </h3>
                           <p className="text-sm text-muted dark:text-slate-300">
-                            Tap item untuk toggle assignment.
+                            Atur jumlah porsi per item.
                           </p>
                         </div>
-                        <button
-                          className="btn-secondary w-full sm:w-auto"
-                          onClick={() => toggleAllForPerson(participant.id)}
-                        >
-                          Pilih semua / lepas semua
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            className="btn-secondary w-full sm:w-auto"
+                            onClick={() => assignAllForPerson(participant.id)}
+                          >
+                            Ambil semua porsi
+                          </button>
+                          <button
+                            className="btn-secondary w-full sm:w-auto"
+                            onClick={() => clearAllForPerson(participant.id)}
+                          >
+                            Kosongkan
+                          </button>
+                        </div>
                       </div>
 
                       <div className="mt-4 space-y-3">
                         {assignableItems.map((item) => {
-                          const assignedToPerson = (state.assignments[item.id] || []).includes(participant.id);
-                          const assignedCount = (state.assignments[item.id] || []).length;
+                          const quantity = Math.max(1, item.quantity || 1);
+                          const assignment = normalizeItemAssignment(state.assignments[item.id], quantity);
+                          const units = assignment[participant.id] || 0;
+                          const otherUnits = getAssignedUnits(assignment) - units;
+                          const maxForPerson = Math.max(0, quantity - otherUnits);
                           const isUnassigned = summary.unassignedItemIds.includes(item.id);
+                          const unitPrice = item.price;
 
                           return (
-                            <button
+                            <div
                               key={item.id}
-                              className={`flex w-full items-center justify-between rounded-3xl border px-4 py-3 text-left transition ${
-                                assignedToPerson
+                              className={`flex w-full items-center justify-between gap-3 rounded-3xl border px-4 py-3 ${
+                                units > 0
                                   ? 'border-brand bg-brand/10 text-ink dark:bg-brand/15 dark:text-white'
                                   : isUnassigned
                                     ? 'border-warn bg-amber-50 text-ink dark:border-warn/70 dark:bg-amber-500/10 dark:text-white'
                                     : 'border-slate-200 bg-white text-ink dark:border-slate-800 dark:bg-slate-950 dark:text-white'
                               }`}
-                              onClick={() =>
-                                dispatch({
-                                  type: 'toggleAssignment',
-                                  itemId: item.id,
-                                  participantId: participant.id,
-                                })
-                              }
                             >
-                              <span className="flex flex-col">
-                                <span className="font-medium">
-                                  {assignedToPerson ? '☑' : '☐'} {item.name || 'Item tanpa nama'}
+                              <span className="flex min-w-0 flex-col">
+                                <span className="truncate font-medium">
+                                  {item.name || 'Item tanpa nama'}
                                 </span>
                                 <span className="text-sm text-muted dark:text-slate-300">
-                                  {formatCurrency(item.price * item.quantity)}
+                                  {quantity}x • {formatCurrency(unitPrice)}/porsi
+                                  {units > 0 ? ` • ${formatCurrency(unitPrice * units)}` : ''}
                                 </span>
                               </span>
-                              {assignedCount > 1 ? <span className="pill">Shared {assignedCount}</span> : null}
-                            </button>
+                              <span className="flex shrink-0 items-center gap-2">
+                                <button
+                                  type="button"
+                                  className="btn-secondary h-9 w-9 !px-0 text-lg"
+                                  aria-label={`Kurangi porsi ${item.name}`}
+                                  disabled={units <= 0}
+                                  onClick={() =>
+                                    dispatch({
+                                      type: 'setItemUnits',
+                                      itemId: item.id,
+                                      participantId: participant.id,
+                                      units: units - 1,
+                                    })
+                                  }
+                                >
+                                  −
+                                </button>
+                                <span className="w-6 text-center font-semibold">{units}</span>
+                                <button
+                                  type="button"
+                                  className="btn-secondary h-9 w-9 !px-0 text-lg"
+                                  aria-label={`Tambah porsi ${item.name}`}
+                                  disabled={units >= maxForPerson}
+                                  onClick={() =>
+                                    dispatch({
+                                      type: 'setItemUnits',
+                                      itemId: item.id,
+                                      participantId: participant.id,
+                                      units: units + 1,
+                                    })
+                                  }
+                                >
+                                  +
+                                </button>
+                              </span>
+                            </div>
                           );
                         })}
                       </div>
@@ -1759,9 +1931,15 @@ function App() {
                               {lineItem.name}
                             </p>
                             <p className="text-xs text-muted dark:text-slate-300">
-                              {lineItem.splitCount > 1
-                                ? `dibagi ${lineItem.splitCount} orang`
-                                : `${lineItem.quantity}x penuh`}
+                              {lineItem.autoSplit
+                                ? 'diskon proporsional'
+                                : lineItem.units
+                                  ? `${lineItem.units}x${lineItem.quantity > 1 ? ` dari ${lineItem.quantity}` : ''}${
+                                      lineItem.splitCount > 1 ? ` • dipisah ${lineItem.splitCount} orang` : ''
+                                    }`
+                                  : lineItem.splitCount > 1
+                                    ? `dibagi ${lineItem.splitCount} orang`
+                                    : `${lineItem.quantity}x penuh`}
                             </p>
                           </div>
                           <p className="shrink-0 text-sm font-semibold text-ink dark:text-white">
@@ -1836,9 +2014,11 @@ function App() {
               <StatCard
                 label="Assign"
                 value={
-                  summary.hasUnassignedItems
-                    ? `${summary.unassignedItemIds.length} belum`
-                    : 'Semua lengkap'
+                  summary.hasOverAssignedItems
+                    ? `${summary.overAssignedItemIds.length} kelebihan`
+                    : summary.hasUnassignedItems
+                      ? `${summary.unassignedItemIds.length} belum`
+                      : 'Semua lengkap'
                 }
               />
             </div>
@@ -1856,18 +2036,29 @@ function App() {
       </main>
       ) : null}
 
-      {/* Spacer so the fixed bottom nav never covers the last bit of content */}
-      <div className="h-20" aria-hidden="true" />
+      {/* Spacer so the fixed bottom bars never cover the last bit of content.
+          Taller on the session page because the step dock stacks above the nav. */}
+      <div
+        className={`${activePage === 'session' ? 'h-32 lg:h-20' : 'h-20'}`}
+        aria-hidden="true"
+      />
 
-      <BottomNav activePage={activePage} onSelect={goToPage} isAdmin={isAdmin} />
+      <div className="fixed inset-x-0 bottom-0 z-40 pb-[env(safe-area-inset-bottom)]">
+        {activePage === 'session' ? (
+          <div className="lg:hidden">
+            <MobileStepDock currentStep={state.currentStep} onSelect={goToStep} />
+          </div>
+        ) : null}
+        <BottomNav activePage={activePage} onSelect={goToPage} isAdmin={isAdmin} />
+      </div>
     </div>
   );
 }
 
 function Stepper({ currentStep, onSelect }) {
   return (
-    <section className="glass-card p-2 sm:p-3 md:p-5">
-      <div className="mobile-scroller sm:grid sm:gap-2 sm:gap-3 sm:overflow-visible sm:px-0 sm:pb-0 sm:[scrollbar-width:auto] sm:grid-cols-4">
+    <section className="glass-card hidden p-2 lg:block lg:p-4">
+      <div className="grid grid-cols-4 gap-3">
         {steps.map((step) => {
           const active = step.id === currentStep;
           const completed = step.id < currentStep;
@@ -1878,18 +2069,19 @@ function Stepper({ currentStep, onSelect }) {
               key={step.id}
               type="button"
               disabled={!reachable}
+              aria-current={active ? 'step' : undefined}
               onClick={() => onSelect?.(step.id)}
-              className={`text-left rounded-[26px] border p-3 sm:p-4 transition ${
+              className={`rounded-[26px] border p-4 text-left transition ${
                 active
                   ? 'border-brand bg-brand text-white'
                   : completed
                     ? 'border-aqua/40 bg-aqua/10 text-ink dark:text-white hover:border-aqua'
                     : 'border-slate-200 bg-white/70 text-muted dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300'
-              } ${reachable ? 'cursor-pointer' : 'cursor-not-allowed opacity-90'} min-w-[200px] sm:min-w-0 snap-start`}
+              } ${reachable ? 'cursor-pointer' : 'cursor-not-allowed opacity-90'}`}
             >
-              <div className="flex items-center gap-2 sm:gap-3">
+              <div className="flex items-center gap-3">
                 <div
-                  className={`flex h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl text-xs sm:text-sm font-bold ${
+                  className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-sm font-bold ${
                     active
                       ? 'bg-white/20 text-white'
                       : completed
@@ -1900,8 +2092,8 @@ function Stepper({ currentStep, onSelect }) {
                   {completed ? '✓' : step.id}
                 </div>
                 <div className="min-w-0">
-                  <p className="text-xs sm:text-sm font-semibold truncate">{step.title}</p>
-                  <p className={`text-xs truncate ${active ? 'text-white/80' : 'text-muted dark:text-slate-400'}`}>
+                  <p className="truncate text-sm font-semibold">{step.title}</p>
+                  <p className={`truncate text-xs ${active ? 'text-white/80' : 'text-muted dark:text-slate-400'}`}>
                     {step.caption}
                   </p>
                 </div>
@@ -1914,6 +2106,51 @@ function Stepper({ currentStep, onSelect }) {
   );
 }
 
+function MobileStepDock({ currentStep, onSelect }) {
+  return (
+    <nav
+      aria-label="Langkah pengisian"
+      className="border-t border-slate-200 bg-white/95 pt-1 backdrop-blur-lg dark:border-slate-800 dark:bg-slate-950/95"
+    >
+      <div className="mx-auto grid w-full max-w-lg grid-cols-4 gap-1 px-2">
+        {steps.map((step) => {
+          const active = step.id === currentStep;
+          const completed = step.id < currentStep;
+          const reachable = step.id <= currentStep;
+
+          return (
+            <button
+              key={step.id}
+              type="button"
+              disabled={!reachable}
+              aria-current={active ? 'step' : undefined}
+              onClick={() => onSelect?.(step.id)}
+              className={`flex flex-col items-center gap-1 rounded-2xl px-1 py-1.5 transition ${
+                active ? 'bg-brand text-white' : completed ? 'text-aqua' : 'text-muted dark:text-slate-400'
+              } ${reachable ? '' : 'opacity-45'}`}
+            >
+              <span
+                className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold ${
+                  active
+                    ? 'bg-white/25 text-white'
+                    : completed
+                      ? 'bg-aqua text-white'
+                      : 'bg-slate-100 text-ink dark:bg-slate-800 dark:text-white'
+                }`}
+              >
+                {completed ? '✓' : step.id}
+              </span>
+              <span className="w-full truncate text-center text-[10px] font-medium leading-tight">
+                {step.title}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
 function BottomNav({ activePage, onSelect, isAdmin }) {
   const visiblePages = pages.filter((page) => !page.adminOnly || isAdmin);
 
@@ -1921,7 +2158,7 @@ function BottomNav({ activePage, onSelect, isAdmin }) {
   // width; on desktop the icon group stays centered inside a capped container.
   return (
     <nav
-      className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-lg dark:border-slate-800 dark:bg-slate-950/95"
+      className="border-t border-slate-200 bg-white/95 backdrop-blur-lg dark:border-slate-800 dark:bg-slate-950/95"
       aria-label="Navigasi utama"
     >
       <div

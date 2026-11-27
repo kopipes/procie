@@ -55,9 +55,53 @@ export function normalizeReceipt(receipt) {
   };
 }
 
+// Assignments store how many units of an item each person ate:
+//   assignments[itemId] = { [participantId]: unitCount }
+// This lets an item with quantity 3 be split as 1 for A and 2 for B, instead
+// of only "shared by N people". Legacy array assignments are still accepted
+// and converted on read for backwards compatibility.
+export function normalizeItemAssignment(raw, quantity) {
+  const result = {};
+
+  if (Array.isArray(raw)) {
+    // Legacy shape: array of participant ids. Treat each entry as 1 unit and
+    // spread the remaining units round-robin so the total is preserved.
+    const ids = raw.filter(Boolean);
+    const total = Math.max(1, quantity || 1);
+
+    ids.forEach((participantId, index) => {
+      const base = Math.floor(total / ids.length);
+      const extraRemaining = total % ids.length;
+      const units = base + (index < extraRemaining ? 1 : 0);
+      result[participantId] = units;
+    });
+
+    return result;
+  }
+
+  if (raw && typeof raw === 'object') {
+    Object.entries(raw).forEach(([participantId, units]) => {
+      const parsed = Number.parseInt(units, 10);
+      if (participantId && Number.isFinite(parsed) && parsed > 0) {
+        result[participantId] = parsed;
+      }
+    });
+  }
+
+  return result;
+}
+
+export function getAssignedUnits(assignment) {
+  if (!assignment) {
+    return 0;
+  }
+
+  return Object.values(assignment).reduce((sum, units) => sum + (Number(units) || 0), 0);
+}
+
 export function createEmptyAssignments(items, previous = {}) {
   return items.reduce((accumulator, item) => {
-    accumulator[item.id] = Array.isArray(previous[item.id]) ? previous[item.id] : [];
+    accumulator[item.id] = normalizeItemAssignment(previous[item.id], item.quantity);
     return accumulator;
   }, {});
 }
@@ -102,38 +146,63 @@ export function calculateSummary({ receipt, participants, assignments }) {
   const unassignedItemIds = [];
   const discountItems = [];
 
+  const itemValidation = {};
+  const overAssignedItemIds = [];
+
   normalizedReceipt.items.forEach((item) => {
     if (isDiscountItem(item)) {
       discountItems.push(item);
       return;
     }
 
-    const assignees = (assignments[item.id] || []).filter((participantId) =>
+    const quantity = Math.max(1, item.quantity || 1);
+    const assignment = normalizeItemAssignment(assignments[item.id], quantity);
+    const assigneeIds = Object.keys(assignment).filter((participantId) =>
       personIndex.has(participantId),
     );
+    const assignedUnits = assigneeIds.reduce((sum, participantId) => sum + assignment[participantId], 0);
 
-    if (!assignees.length) {
+    itemValidation[item.id] = {
+      quantity,
+      assignedUnits,
+      remainingUnits: quantity - assignedUnits,
+    };
+
+    if (assignedUnits > quantity) {
+      overAssignedItemIds.push(item.id);
+    }
+
+    if (!assignedUnits) {
       unassignedItemIds.push(item.id);
       return;
     }
 
-    const total = itemLineTotal(item);
-    const splitValues = allocateRounded(
-      assignees.map(() => total / assignees.length),
-      total,
+// Bill each person by the units they eat. If a person is assigned more units
+    // than the item actually has (over-assigned), their share is scaled down
+    // proportionally so the item total is never exceeded. If the item is only
+    // partially assigned, only the assigned units are billed (the remainder
+    // stays unassigned until the user allocates it).
+    const unitPrice = itemLineTotal(item) / quantity;
+    const scale = assignedUnits > quantity ? quantity / assignedUnits : 1;
+    const rawShares = assigneeIds.map(
+      (participantId) => unitPrice * assignment[participantId] * scale,
     );
+    const shareTarget = Math.round(rawShares.reduce((sum, value) => sum + value, 0));
+    const splitValues = allocateRounded(rawShares, shareTarget);
 
-    assignees.forEach((participantId, index) => {
+    assigneeIds.forEach((participantId, index) => {
       const person = people[personIndex.get(participantId)];
+      const units = assignment[participantId];
       const share = splitValues[index];
 
       person.lineItems.push({
         itemId: item.id,
         name: item.name,
-        quantity: item.quantity,
+        quantity,
+        units,
         share,
-        total,
-        splitCount: assignees.length,
+        total: itemLineTotal(item),
+        splitCount: assigneeIds.length,
       });
       person.subtotal += share;
     });
@@ -199,19 +268,41 @@ export function calculateSummary({ receipt, participants, assignments }) {
   const grandTotalTarget = normalizedReceipt.grandTotal || computedGrandTotal;
   const grandTotalMismatch = grandTotalTarget - computedGrandTotal;
 
-  if (grandTotalMismatch !== 0 && people[0]) {
-    people[0].total += grandTotalMismatch;
-    people[0].service += grandTotalMismatch;
+  if (grandTotalMismatch !== 0 && people.length > 0) {
+    // Distribute the mismatch proportionally by each person's total so no
+    // single person silently absorbs the entire discrepancy.
+    const mismatchAllocations = allocateRounded(
+      people.map((person) =>
+        computedGrandTotal > 0 ? (person.total / computedGrandTotal) * grandTotalMismatch : grandTotalMismatch / people.length,
+      ),
+      grandTotalMismatch,
+    );
+    people.forEach((person, index) => {
+      person.total += mismatchAllocations[index];
+      person.service += mismatchAllocations[index];
+    });
   }
+
+  const billableItems = normalizedReceipt.items.filter((item) => !isDiscountItem(item));
+  const fullyAssignedCount = billableItems.filter((item) => {
+    const validation = itemValidation[item.id];
+    return validation && validation.remainingUnits === 0 && validation.assignedUnits <= validation.quantity;
+  }).length;
+  const incompleteItemIds = billableItems
+    .filter((item) => {
+      const validation = itemValidation[item.id];
+      return validation && (validation.remainingUnits > 0 || validation.assignedUnits > validation.quantity);
+    })
+    .map((item) => item.id);
 
   return {
     receipt: normalizedReceipt,
     people,
-    progress: normalizedReceipt.items.filter((item) => !isDiscountItem(item)).length
-      ? (normalizedReceipt.items.filter((item) => !isDiscountItem(item)).length - unassignedItemIds.length) /
-        normalizedReceipt.items.filter((item) => !isDiscountItem(item)).length
-      : 0,
+    progress: billableItems.length ? fullyAssignedCount / billableItems.length : 0,
     unassignedItemIds,
+    overAssignedItemIds,
+    incompleteItemIds,
+    itemValidation,
     totals: {
       subtotal: subtotalBase,
       tax: taxTarget,
@@ -220,8 +311,15 @@ export function calculateSummary({ receipt, participants, assignments }) {
       computedGrandTotal: grandTotalTarget,
     },
     hasUnassignedItems: unassignedItemIds.length > 0,
+    hasOverAssignedItems: overAssignedItemIds.length > 0,
+    hasIncompleteItems: incompleteItemIds.length > 0,
+    // Number of people who share each item (used for badges).
     shareMap: normalizedReceipt.items.reduce((accumulator, item) => {
-      accumulator[item.id] = clamp((assignments[item.id] || []).length, 0, participants.length);
+      const assignment = normalizeItemAssignment(assignments[item.id], item.quantity);
+      const peopleCount = Object.keys(assignment).filter((participantId) =>
+        personIndex.has(participantId),
+      ).length;
+      accumulator[item.id] = clamp(peopleCount, 0, participants.length);
       return accumulator;
     }, {}),
   };
@@ -241,8 +339,17 @@ export function buildShareText(summary) {
   summary.people.forEach((person) => {
     lines.push(`👤 ${person.name}: Rp ${person.total.toLocaleString('id-ID')}`);
     person.lineItems.forEach((lineItem) => {
-      const splitLabel = lineItem.splitCount > 1 ? ` (split ${lineItem.splitCount})` : '';
-      lines.push(`   • ${lineItem.name}${splitLabel}: Rp ${lineItem.share.toLocaleString('id-ID')}`);
+      if (lineItem.autoSplit) {
+        lines.push(`   • ${lineItem.name}: Rp ${lineItem.share.toLocaleString('id-ID')}`);
+        return;
+      }
+
+      const unitsLabel = lineItem.units
+        ? `${lineItem.units}x${lineItem.quantity > 1 ? ` dari ${lineItem.quantity}` : ''}`
+        : '';
+      const splitLabel = lineItem.splitCount > 1 ? `, split ${lineItem.splitCount} org` : '';
+      const detail = unitsLabel ? ` (${unitsLabel}${splitLabel})` : splitLabel ? ` (${splitLabel.slice(2)})` : '';
+      lines.push(`   • ${lineItem.name}${detail}: Rp ${lineItem.share.toLocaleString('id-ID')}`);
     });
 
     const overhead = person.tax + person.service;
